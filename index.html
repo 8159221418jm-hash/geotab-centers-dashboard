@@ -1,1 +1,103 @@
-\n<html>\n<head>\n  <meta charset='utf-8'>\n  <script src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js'></script>\n  <link rel='stylesheet' href='https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.2/css/bootstrap.min.css'>\n  <style>\n    #loader { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.9); z-index: 1000; display: flex; flex-direction: column; justify-content: center; align-items: center; }\n    .score-high { color: #198754 !important; font-weight: bold; } \n    .score-med { color: #fd7e14 !important; font-weight: bold; }  \n    .score-low { color: #dc3545 !important; font-weight: bold; }  \n    .nav-pills .nav-link { font-size: 0.8rem; text-transform: uppercase; cursor: pointer; color: #6c757d; }\n    .nav-pills .nav-link.active { background-color: #0d6efd !important; color: white !important; }\n    .card { border: none; border-radius: 12px; }\n    .table-container { max-height: 450px; overflow-y: auto; }\n  </style>\n</head>\n<body style='background:#f4f7f6; padding: 25px;'>\n\n  <div id='loader'>\n    <div class='spinner-border text-primary'></div>\n    <div class='mt-2 fw-bold'>Syncing b330D Analytics...</div>\n  </div>\n\n  <div class='container-fluid'>\n    <div class='d-flex justify-content-between align-items-center mb-4'>\n      <div>\n        <h2 style='font-weight:300; margin-bottom:0;'>Fleet Performance Hub</h2>\n        <p class='text-muted small'>Parent Group: b330D | Rolling 7-Day Window</p>\n      </div>\n      <button onclick='exportCSV()' class='btn btn-success btn-sm'>Export CSV</button>\n    </div>\n\n    <div class='row mb-3'>\n        <div class='col-12'>\n            <ul class='nav nav-pills bg-white p-2 rounded shadow-sm' id='metric-switcher'>\n                <li class='nav-item'><a class='nav-link active' data-metric='avg'>Total Utilization</a></li>\n                <li class='nav-item'><a class='nav-link' data-metric='pTime'>Drive Time Focus</a></li>\n                <li class='nav-item'><a class='nav-link' data-metric='pDist'>Distance Focus</a></li>\n            </ul>\n        </div>\n    </div>\n\n    <div class='row'>\n      <div class='col-lg-8'>\n          <div class='card shadow-sm mb-4'><div class='card-body'><canvas id='utilizationChart' style='max-height:450px;'></canvas></div></div>\n      </div>\n      <div class='col-lg-4'>\n        <div class='card shadow-sm'>\n          <div class='card-body p-0 table-container'>\n            <table class='table table-hover mb-0'>\n              <thead class='table-light'><tr><th class='ps-3'>Sub-Center</th><th class='text-end pe-3'>Score</th></tr></thead>\n              <tbody id='results-body'></tbody>\n            </table>\n          </div>\n        </div>\n      </div>\n    </div>\n  </div>\n\n  <script>\n    var TARGET_ID = 'b330D';\n    var chartInstance = null, allReportData = [], currentMetric = 'avg';\n\n    function getScoreClass(val) {\n      if (val >= 75) return 'score-high';\n      if (val >= 45) return 'score-med';\n      return 'score-low';\n    }\n\n    function exportCSV() {\n      var csv = 'Center,Score%\\n' + allReportData.map(function(d){ return '\"'+d.name+'\",'+d[currentMetric].toFixed(2); }).join('\\n');\n      var blob = new Blob([csv], { type: 'text/csv' });\n      var a = document.createElement('a'); a.href = window.URL.createObjectURL(blob); a.download = 'Fleet_Export_b330D.csv'; a.click();\n    }\n\n    geotab.addin['Centers-Pro'] = function() {\n      return {\n        initialize: function(api, state, callback) {\n          var last7Days = new Date(); last7Days.setDate(last7Days.getDate() - 7);\n\n          Promise.all([\n            api.makeCall('Get', { typeName: 'Group', search: { id: TARGET_ID } }),\n            api.makeCall('Get', { typeName: 'Device', search: { groups: [{ id: TARGET_ID }] } }),\n            api.makeCall('Get', { typeName: 'Trip', search: { fromDate: last7Days.toISOString(), groups: [{ id: TARGET_ID }] } })\n          ]).then(function(results) {\n            var parentGroup = results[0][0], devices = results[1], trips = results[2], subGroups = parentGroup.children || [];\n            var devStats = {};\n            \n            devices.forEach(function(d) {\n              var vT = trips.filter(function(t){ return t.device.id === d.id; });\n              devStats[d.id] = {\n                driveTime: vT.reduce(function(a, b){ return a + (new Date(b.stop) - new Date(b.start)); }, 0) / 3600000,\n                distance: vT.reduce(function(a, b){ return a + (b.distance || 0); }, 0),\n                groups: d.groups.map(function(g){ return g.id; })\n              };\n            });\n\n            allReportData = subGroups.map(function(g) {\n              var members = Object.values(devStats).filter(function(s){ return s.groups.indexOf(g.id) !== -1; });\n              if (members.length === 0) return null;\n              var mxT = Math.max.apply(Math, members.map(function(m){ return m.driveTime; })) || 0.1;\n              var mxD = Math.max.apply(Math, members.map(function(m){ return m.distance; })) || 0.1;\n              var pTime = (members.reduce(function(s,m){ return s + (m.driveTime/mxT); }, 0)/members.length)*100;\n              var pDist = (members.reduce(function(s,m){ return s + (m.distance/mxD); }, 0)/members.length)*100;\n              return { name: g.name, pTime: pTime, pDist: pDist, avg: (pTime + pDist)/2 };\n            }).filter(function(g){ return g !== null; });\n\n            document.querySelectorAll('#metric-switcher .nav-link').forEach(function(el) {\n                el.onclick = function() {\n                    document.querySelector('#metric-switcher .active').classList.remove('active');\n                    this.classList.add('active');\n                    currentMetric = this.getAttribute('data-metric');\n                    render();\n                };\n            });\n\n            render();\n            document.getElementById('loader').style.display = 'none';\n          }).catch(function(err){ console.error(err); });\n          callback();\n        }\n      };\n\n      function render() {\n        var sorted = allReportData.sort(function(a,b){ return b[currentMetric] - a[currentMetric]; });\n        document.getElementById('results-body').innerHTML = sorted.map(function(d){\n          var val = d[currentMetric];\n          return '<tr><td class=\"ps-3\">'+d.name+'</td><td class=\"text-end pe-3 '+getScoreClass(val)+'\">'+val.toFixed(1)+'%</td></tr>';\n        }).join('');\n\n        if (chartInstance) chartInstance.destroy();\n        chartInstance = new Chart(document.getElementById('utilizationChart'), {\n          type: 'bar', \n          data: { \n            labels: sorted.map(function(d){ return d.name; }), \n            datasets: [{ \n                data: sorted.map(function(d){ return d[currentMetric]; }), \n                backgroundColor: sorted.map(function(d){ \n                    var v = d[currentMetric];\n                    return v >= 75 ? '#198754' : (v >= 45 ? '#fd7e14' : '#dc3545'); \n                }), \n                borderRadius: 6 \n            }] \n          },\n          options: { \n              indexAxis: 'y', \n              plugins: { legend: { display: false } }, \n              scales: { x: { max: 100, beginAtZero: true } }\n          }\n        });\n      }\n    };\n  </script>\n</body>\n
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Center Analytics Pro</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.2/css/bootstrap.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+    
+    <style>
+        body { background: #f4f7f6; padding: 25px; font-family: sans-serif; }
+        #loader { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: white; z-index: 1000; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+        .card { border: none; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .score-high { color: #198754; font-weight: bold; }
+        .score-med { color: #fd7e14; font-weight: bold; }
+        .score-low { color: #dc3545; font-weight: bold; }
+        .nav-pills .nav-link { cursor: pointer; color: #6c757d; border: 1px solid transparent; margin-right: 5px; }
+        .nav-pills .nav-link.active { background-color: #0d6efd !important; color: white !important; }
+        #utilizationChart { width: 100% !important; height: 400px !important; }
+    </style>
+</head>
+<body>
+
+    <div id="loader">
+        <div class="spinner-border text-primary"></div>
+        <div class="mt-2 fw-bold">Connecting to MyGeotab...</div>
+    </div>
+
+    <div class="container-fluid">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div>
+                <h2 class="h3 mb-0">Fleet Performance Hub</h2>
+                <p class="text-muted small">Group: b330D | Last 7 Days</p>
+            </div>
+            <button id="exportBtn" class="btn btn-success btn-sm">Export CSV</button>
+        </div>
+
+        <ul class="nav nav-pills bg-white p-2 rounded shadow-sm mb-4">
+            <li class="nav-item"><a class="nav-link active" id="btn-avg">Total Utilization</a></li>
+            <li class="nav-item"><a class="nav-link" id="btn-pTime">Drive Time</a></li>
+            <li class="nav-item"><a class="nav-link" id="btn-pDist">Distance</a></li>
+        </ul>
+
+        <div class="row">
+            <div class="col-lg-8">
+                <div class="card mb-4"><div class="card-body"><canvas id="utilizationChart"></canvas></div></div>
+            </div>
+            <div class="col-lg-4">
+                <div class="card"><div class="card-body p-0">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light"><tr><th class="ps-3">Sub-Center</th><th class="text-end pe-3">Score</th></tr></thead>
+                        <tbody id="results-body"></tbody>
+                    </table>
+                </div></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Use the proper Geotab Add-In structure for hosted files
+        geotab.addin.CentersPro = function (api, state) {
+            var TARGET_ID = 'b330D';
+            var chartInstance = null;
+            var allData = [];
+            var currentMetric = 'avg';
+
+            function getScoreClass(val) {
+                if (val >= 75) return 'score-high';
+                if (val >= 45) return 'score-med';
+                return 'score-low';
+            }
+
+            function render() {
+                var sorted = allData.sort((a, b) => b[currentMetric] - a[currentMetric]);
+                document.getElementById('results-body').innerHTML = sorted.map(d => `
+                    <tr><td class="ps-3">${d.name}</td><td class="text-end pe-3 ${getScoreClass(d[currentMetric])}">${d[currentMetric].toFixed(1)}%</td></tr>
+                `).join('');
+
+                if (chartInstance) chartInstance.destroy();
+                var ctx = document.getElementById('utilizationChart').getContext('2d');
+                chartInstance = new Chart(ctx, {
+                    type: 'bar',
+                    data: {
+                        labels: sorted.map(d => d.name),
+                        datasets: [{
+                            data: sorted.map(d => d[currentMetric]),
+                            backgroundColor: sorted.map(d => d[currentMetric] >= 75 ? '#198754' : (d[currentMetric] >= 45 ? '#fd7e14' : '#dc3545')),
+                            borderRadius: 6
+                        }]
+                    },
+                    options: { indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { max: 100, beginAtZero: true } }, maintainAspectRatio: false }
+                });
+            }
+
+            return {
+                initialize: function (api, state, callback) {
+                    var last7Days = new Date(); last7Days.setDate(last7Days.getDate() - 7);
+                    
+                    Promise.all([
+                        api.makeCall('Get', { typeName: 'Group', search: { id: TARGET_ID } }),
+                        api.makeCall('Get', { typeName: 'Device', search: { groups: [{ id: TARGET_ID }] } }),
+                        api.makeCall('Get', { typeName: 'Trip', search: { fromDate: last7Days.toISOString(), groups: [{ id: TARGET_ID }] } })
+                    ]).then(function (results) {
+                        var parentGroup = results[0][0], devices
